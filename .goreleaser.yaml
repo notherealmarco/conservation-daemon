@@ -1,0 +1,137 @@
+version: 2
+
+project_name: conservation
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: conservationd
+    main: ./cmd/daemon
+    binary: conservationd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -mod=vendor
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+  - id: conservationctl
+    main: ./cmd/cli
+    binary: conservationctl
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -mod=vendor
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: conservationd-archive
+    ids: [conservationd]
+    name_template: "conservationd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    files: []
+  - id: conservationctl-archive
+    ids: [conservationctl]
+    name_template: "conservationctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    files: []
+
+nfpms:
+  - id: pkgs
+    package_name: conservation-daemon
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats: [deb, rpm, apk, archlinux]
+    maintainer: "Marco Realacci <marco@marcorealacci.me>"
+    description: "Battery conservation mode daemon for Lenovo Yoga/IdeaPad (ships conservationctl CLI)"
+    license: MIT
+    homepage: "https://github.com/your-org/conservationDaemon"
+    dependencies:
+      - upower
+    provides:
+      - conservationd
+      - conservationctl
+    conflicts: []
+    ids:
+      - conservationd
+      - conservationctl
+    bindir: /usr/bin
+    contents:
+      - src: ./packaging/systemd/conservationd.service
+        dst: /usr/lib/systemd/system/conservationd.service
+    scripts:
+      postinstall: ./packaging/scripts/postinstall.sh
+      preremove: ./packaging/scripts/preremove.sh
+      postremove: ./packaging/scripts/postremove.sh
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+
+release:
+  draft: false
+  prerelease: auto
+
+# Optional AUR publishing (bin packages). Uncomment and fill repo info to enable.
+aurs:
+  - name: conservation-daemon-bin
+    ids: [conservationd-archive, conservationctl-archive]
+    homepage: https://github.com/your-org/conservationDaemon
+    description: Battery conservation mode daemon for Lenovo Yoga/IdeaPad (binary, ships conservationctl CLI)
+    maintainers:
+      - Marco Realacci <marco@marcorealacci.me>
+    license: MIT
+    provides: [conservationd, conservationctl]
+    conflicts: [conservationd]
+    depends: [upower]
+    # Fill this with your actual AUR repo when ready and set a private_key env var
+    git_url: ""
+    private_key: "{{ .Env.AUR_PRIVATE_KEY }}"
+    skip_upload: true
+    # Download URL for release artifacts (adjust org/repo as needed)
+    url_template: "https://github.com/your-org/conservationDaemon/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    # Package instructions: install binary and systemd unit
+    package: |-
+      install -Dm755 "./conservationd" "${pkgdir}/usr/bin/conservationd"
+      install -Dm755 "./conservationctl" "${pkgdir}/usr/bin/conservationctl"
+      # Write systemd unit file
+      install -d "${pkgdir}/usr/lib/systemd/system"
+      cat >"${pkgdir}/usr/lib/systemd/system/conservationd.service" <<'EOF'
+      [Unit]
+      Description=Battery Conservation Mode Daemon (Lenovo Yoga/IdeaPad)
+      After=network.target dbus.service upower.service
+      Wants=upower.service
+      
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/conservationd
+      Restart=on-failure
+      RestartSec=5s
+      RuntimeDirectory=conservationd
+      Group=conservationd
+      RuntimeDirectoryMode=0770
+      
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+    # Include a .install file to manage systemd
+    install: ./packaging/aur/conservationd.install
