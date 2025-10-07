@@ -54,7 +54,7 @@ jobs:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           # Full release: builds, uploads (HTTP), and AUR publish
-          export GITEA_TOKEN=$GITHUB_TOKEN
+          export GITEA_TOKEN=${{ secrets.FORGEJO_PULL_TOKEN }}
           unset GITHUB_TOKEN
           $(go env GOPATH)/bin/goreleaser release --clean --skip=announce
 
