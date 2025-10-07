@@ -96,24 +96,35 @@ release:
   draft: false
   prerelease: auto
 
+uploads:
+  - name: forgejo-generic-archives
+    # Upload only the linux archives we want AUR to reference
+    ids: [conservationd-archive, conservationctl-archive]
+    target: "{{ .Env.FORGEJO_URL }}/api/packages/{{ .Env.FORGEJO_OWNER }}/generic/conservation-daemon/{{ .Version }}/{{ .ArtifactName }}"
+    method: PUT
+    custom_artifact_name: true
+    custom_headers:
+      Authorization: "token {{ .Env.FORGEJO_TOKEN }}"
+      Content-Type: application/octet-stream
+
 # Optional AUR publishing (bin packages). Uncomment and fill repo info to enable.
 aurs:
   - name: conservation-daemon-bin
     ids: [conservationd-archive, conservationctl-archive]
-    homepage: https://github.com/your-org/conservationDaemon
-    description: Battery conservation mode daemon for Lenovo Yoga/IdeaPad (binary, ships conservationctl CLI)
+    homepage: https://git.marcorealacci.me/marcorealacci/conservation-daemon
+    description: Battery conservation mode daemon for Lenovo Yoga/IdeaPad (prebuilt binaries)
     maintainers:
       - Marco Realacci <marco@marcorealacci.me>
     license: MIT
-    provides: [conservationd, conservationctl]
-    conflicts: [conservationd]
+    provides: [conservation-daemon, conservationd, conservationctl]
+    conflicts: [conservation-daemon]
     depends: [upower]
     # Fill this with your actual AUR repo when ready and set a private_key env var
-    git_url: ""
+    git_url: "ssh://aur@aur.archlinux.org/conservation-daemon-bin.git"
     private_key: "{{ .Env.AUR_PRIVATE_KEY }}"
-    skip_upload: true
-    # Download URL for release artifacts (adjust org/repo as needed)
-    url_template: "https://github.com/your-org/conservationDaemon/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    skip_upload: auto
+    # Download URL for release artifacts hosted in Forgejo Package Registry (generic)
+    url_template: "https://git.marcorealacci.me/api/packages/marcorealacci/generic/conservation-daemon/{{ .Version }}/{{ .ArtifactName }}"
     # Package instructions: install binary and systemd unit
     package: |-
       install -Dm755 "./conservationd" "${pkgdir}/usr/bin/conservationd"
