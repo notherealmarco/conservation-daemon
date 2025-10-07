@@ -23,7 +23,7 @@ builds:
       - linux
     goarch:
       - amd64
-      - arm64
+      # - arm64
   - id: conservationctl
     main: ./cmd/cli
     binary: conservationctl
@@ -40,18 +40,13 @@ builds:
       - linux
     goarch:
       - amd64
-      - arm64
+      # - arm64
 
 archives:
-  - id: conservationd-archive
-    ids: [conservationd]
-    name_template: "conservationd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format: tar.gz
-    files: []
-  - id: conservationctl-archive
-    ids: [conservationctl]
-    name_template: "conservationctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format: tar.gz
+  - id: conservation-archive
+    ids: [conservationd, conservationctl]
+    name_template: "conservation-daemon_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [ 'tar.gz']
     files: []
 
 nfpms:
@@ -62,7 +57,7 @@ nfpms:
     maintainer: "Marco Realacci <marco@marcorealacci.me>"
     description: "Battery conservation mode daemon for Lenovo Yoga/IdeaPad (ships conservationctl CLI)"
     license: MIT
-    homepage: "https://github.com/your-org/conservationDaemon"
+    homepage: "https://git.marcorealacci.me/marcorealacci/conservation-daemon"
     dependencies:
       - upower
     provides:
@@ -96,47 +91,61 @@ release:
   draft: false
   prerelease: auto
 
-# Optional AUR publishing (bin packages). Uncomment and fill repo info to enable.
+gitea_urls:
+  api: https://git.marcorealacci.me/api/v1/
+  download: https://git.marcorealacci.me/
+
+# uploads:
+#   - name: forgejo-generic-archives
+#     ids: [conservation-archive]
+#     target: "{{ .Env.FORGEJO_URL }}/api/packages/{{ .Env.FORGEJO_OWNER }}/generic/conservation-daemon/{{ .Version }}/{{ .ArtifactName }}"
+#     method: PUT
+#     custom_artifact_name: true
+#     custom_headers:
+#       Authorization: "token {{ .Env.FORGEJO_TOKEN }}"
+#       Content-Type: application/octet-stream
+#     mode: archive
+
 aurs:
   - name: conservation-daemon-bin
-    ids: [conservationd-archive, conservationctl-archive]
-    homepage: https://github.com/your-org/conservationDaemon
-    description: Battery conservation mode daemon for Lenovo Yoga/IdeaPad (binary, ships conservationctl CLI)
+    ids: [conservation-archive]
+    homepage: https://git.marcorealacci.me/marcorealacci/conservation-daemon
+    description: Battery conservation mode daemon for Lenovo Yoga/IdeaPad
     maintainers:
       - Marco Realacci <marco@marcorealacci.me>
     license: MIT
-    provides: [conservationd, conservationctl]
-    conflicts: [conservationd]
+    provides: [conservation-daemon, conservationd, conservationctl]
+    conflicts: [conservation-daemon]
     depends: [upower]
     # Fill this with your actual AUR repo when ready and set a private_key env var
-    git_url: ""
+    git_url: "ssh://aur@aur.archlinux.org/conservation-daemon-bin.git"
     private_key: "{{ .Env.AUR_PRIVATE_KEY }}"
-    skip_upload: true
-    # Download URL for release artifacts (adjust org/repo as needed)
-    url_template: "https://github.com/your-org/conservationDaemon/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    skip_upload: auto
+    # Download URLs for release artifacts hosted in Forgejo Package Registry (generic)
+    url_template: "https://git.marcorealacci.me/marcorealacci/conservation-daemon/releases/download/v{{ .Version }}/{{ .ArtifactName }}"
     # Package instructions: install binary and systemd unit
     package: |-
       install -Dm755 "./conservationd" "${pkgdir}/usr/bin/conservationd"
       install -Dm755 "./conservationctl" "${pkgdir}/usr/bin/conservationctl"
       # Write systemd unit file
       install -d "${pkgdir}/usr/lib/systemd/system"
-      cat >"${pkgdir}/usr/lib/systemd/system/conservationd.service" <<'EOF'
-      [Unit]
-      Description=Battery Conservation Mode Daemon (Lenovo Yoga/IdeaPad)
-      After=network.target dbus.service upower.service
-      Wants=upower.service
-      
-      [Service]
-      Type=simple
-      ExecStart=/usr/bin/conservationd
-      Restart=on-failure
-      RestartSec=5s
-      RuntimeDirectory=conservationd
-      Group=conservationd
-      RuntimeDirectoryMode=0770
-      
-      [Install]
-      WantedBy=multi-user.target
-      EOF
+      printf '%s\n' \
+        '[Unit]' \
+        'Description=Battery Conservation Mode Daemon (Lenovo Yoga/IdeaPad)' \
+        'After=network.target dbus.service upower.service' \
+        'Wants=upower.service' \
+        '' \
+        '[Service]' \
+        'Type=simple' \
+        'ExecStart=/usr/bin/conservationd' \
+        'Restart=on-failure' \
+        'RestartSec=5s' \
+        'RuntimeDirectory=conservationd' \
+        'Group=conservationd' \
+        'RuntimeDirectoryMode=0770' \
+        '' \
+        '[Install]' \
+        'WantedBy=multi-user.target' \
+        > "${pkgdir}/usr/lib/systemd/system/conservationd.service"
     # Include a .install file to manage systemd
     install: ./packaging/aur/conservationd.install

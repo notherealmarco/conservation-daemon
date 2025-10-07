@@ -44,39 +44,18 @@ jobs:
           echo "GoReleaser version:"
           $(go env GOPATH)/bin/goreleaser --version
 
-      - name: Build with GoReleaser (no publish)
+      - name: Build and publish packages
         shell: bash
         env:
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
-        run: |
-          $(go env GOPATH)/bin/goreleaser release --clean --skip=announce,publish
-
-      - name: Upload artifacts to Forgejo Package Registry (generic)
-        shell: bash
-        env:
-          FORGEJO_URL: https://git.marcorealacci.me
-          FORGEJO_OWNER: marcorealacci
+          AUR_PRIVATE_KEY: ${{ secrets.AUR_PRIVATE_KEY }}
+          FORGEJO_URL: ${{ secrets.FORGEJO_URL }}
+          FORGEJO_OWNER: ${{ secrets.FORGEJO_OWNER }}
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
-          set -euo pipefail
-          if [ -z "${FORGEJO_URL:-}" ] || [ -z "${FORGEJO_OWNER:-}" ] || [ -z "${FORGEJO_TOKEN:-}" ]; then
-            echo "FORGEJO_URL, FORGEJO_OWNER, and FORGEJO_TOKEN must be set as repository secrets" >&2
-            exit 1
-          fi
-          VERSION="${GITHUB_REF_NAME#v}"
-          BASE_URL="${FORGEJO_URL%/}/api/packages/${FORGEJO_OWNER}/generic/conservation-daemon/${VERSION}"
-          shopt -s nullglob
-          files=(dist/*.deb dist/*.rpm dist/*.apk dist/*.pkg.tar.zst dist/*.tar.gz)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No artifacts to upload under dist/" >&2
-            exit 1
-          fi
-          for f in "${files[@]}"; do
-            name=$(basename "$f")
-            echo "Uploading $name"
-            curl -fsSL -X PUT \
-              -H "Authorization: token ${FORGEJO_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --upload-file "$f" \
-              "${BASE_URL}/${name}"
-          done
+          # Full release: builds, uploads (HTTP), and AUR publish
+          export GITEA_TOKEN=$GITHUB_TOKEN
+          unset GITHUB_TOKEN
+          $(go env GOPATH)/bin/goreleaser release --clean --skip=announce
+
+      # All publishing handled by GoReleaser above
