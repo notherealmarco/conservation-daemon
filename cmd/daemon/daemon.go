@@ -152,8 +152,8 @@ func main() {
 
 func parseFlags() Config {
     showVersion := flag.Bool("version", false, "print version and exit")
-	max := flag.Float64("max", 90, "target maximum percentage to start capping (80..100)")
-	min := flag.Float64("min", 85, "target minimum percentage to resume charging (50..99)")
+	max := flag.Float64("max", 80, "target maximum percentage to start capping (80..100)")
+	min := flag.Float64("min", 75, "target minimum percentage to resume charging (50..99)")
 	interval := flag.Duration("interval", 45*time.Second, "poll interval")
 	dry := flag.Bool("dry-run", false, "do not write sysfs, only log actions")
 	once := flag.Bool("once", false, "perform a single control step and exit")
