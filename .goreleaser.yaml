@@ -85,7 +85,12 @@ checksum:
   name_template: "checksums.txt"
 
 changelog:
-  use: github
+  use: git
+  sort: desc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
 
 release:
   draft: false

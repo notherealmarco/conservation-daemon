@@ -1,16 +1,24 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.FORGEJO_PULL_TOKEN }}
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -28,18 +36,23 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Install GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          install-only: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Installing GoReleaser via go install"
+          go install github.com/goreleaser/goreleaser/v2@latest
+          echo "GoReleaser version:"
+          $(go env GOPATH)/bin/goreleaser --version
 
       - name: Build with GoReleaser (no publish)
+        shell: bash
         env:
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
         run: |
-          goreleaser release --clean --skip=announce,publish
+          $(go env GOPATH)/bin/goreleaser release --clean --skip=announce,publish
 
       - name: Upload artifacts to Forgejo Package Registry (generic)
+        shell: bash
         env:
           FORGEJO_URL: https://git.marcorealacci.me
           FORGEJO_OWNER: marcorealacci
@@ -51,7 +64,7 @@ jobs:
             exit 1
           fi
           VERSION="${GITHUB_REF_NAME#v}"
-          BASE_URL="${FORGEJO_URL%/}/api/packages/${FORGEJO_OWNER}/generic/conservationd/${VERSION}"
+          BASE_URL="${FORGEJO_URL%/}/api/packages/${FORGEJO_OWNER}/generic/conservation-daemon/${VERSION}"
           shopt -s nullglob
           files=(dist/*.deb dist/*.rpm dist/*.apk dist/*.pkg.tar.zst dist/*.tar.gz)
           if [ ${#files[@]} -eq 0 ]; then
