@@ -13,26 +13,26 @@ import (
 )
 
 type Req struct {
-	Cmd string  `json:"cmd"`
-	Max float64 `json:"max,omitempty"`
-	Min float64 `json:"min,omitempty"`
+	Cmd  string  `json:"cmd"`
+	Max  float64 `json:"max,omitempty"`
+	Time string  `json:"time,omitempty"`
 }
 type Resp struct {
 	Ok    bool    `json:"ok"`
 	Msg   string  `json:"msg,omitempty"`
 	Max   float64 `json:"max,omitempty"`
-	Min   float64 `json:"min,omitempty"`
 	Pct   float64 `json:"pct,omitempty"`
 	State string  `json:"state,omitempty"`
 	Cons  int     `json:"cons,omitempty"`
+	Time  string  `json:"time,omitempty"`
 }
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	sock := flag.String("sock", "/run/conservationd/conservationd.sock", "control socket path")
 	doSet := flag.Bool("set", false, "set thresholds")
-	max := flag.Float64("max", 80, "new max")
-	min := flag.Float64("min", 0, "new min (defaults to max-5 if not specified)")
+	max := flag.Float64("max", 80, "target maximum percentage (80..100)")
+	timeFlag := flag.String("time", "", "target time in HH:MM format for scheduled charging (defaults to 'now')")
 	status := flag.Bool("status", false, "show current status")
 	flag.Parse()
 
@@ -41,27 +41,16 @@ func main() {
         os.Exit(0)
     }
 
-	// Check if min flag was explicitly set by checking if it's still the default value
-	// and if so, set it to max - 5
-	minValue := *min
-	if *min == 0 {
-		// Check if min was explicitly set to 0 by looking at the command line args
-		minExplicitlySet := false
-		for _, arg := range os.Args[1:] {
-			if arg == "-min" || arg == "--min" {
-				minExplicitlySet = true
-				break
-			}
-		}
-		if !minExplicitlySet {
-			minValue = *max - 5
-		}
+	// Handle time parameter
+	timeValue := *timeFlag
+	if timeValue == "" {
+		timeValue = "now"
 	}
 
 	var req Req
 	switch {
 	case *doSet:
-		req = Req{Cmd: "set", Max: *max, Min: minValue}
+		req = Req{Cmd: "set", Max: *max, Time: timeValue}
 	case *status:
 		req = Req{Cmd: "status"}
 	default:
@@ -91,9 +80,9 @@ func main() {
 	}
 	switch req.Cmd {
 	case "set":
-		fmt.Printf("max=%.1f min=%.1f\n", resp.Max, resp.Min)
+		fmt.Printf("max=%.1f time=%s\n", resp.Max, resp.Time)
 	case "status", "get":
-		fmt.Printf("pct=%.1f state=%s cons=%d max=%.1f min=%.1f\n", resp.Pct, resp.State, resp.Cons, resp.Max, resp.Min)
+		fmt.Printf("pct=%.1f state=%s cons=%d max=%.1f time=%s\n", resp.Pct, resp.State, resp.Cons, resp.Max, resp.Time)
 	}
 }
 

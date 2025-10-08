@@ -46,7 +46,6 @@ const (
 
 type Config struct {
 	MaxPercent   float64
-	MinPercent   float64
 	PollInterval time.Duration
 	DryRun       bool
 	Once         bool
@@ -55,6 +54,10 @@ type Config struct {
 	// Control socket
 	SockPath  string
 	SockGroup string
+
+	// Time-based charging
+	TargetTime   *time.Time
+	LevelReached bool // true when target percentage has been reached
 }
 
 type SharedState struct {
@@ -67,32 +70,26 @@ type SharedState struct {
 }
 
 type Req struct {
-	Cmd string  `json:"cmd"`
-	Max float64 `json:"max,omitempty"`
-	Min float64 `json:"min,omitempty"`
+	Cmd  string  `json:"cmd"`
+	Max  float64 `json:"max,omitempty"`
+	Time string  `json:"time,omitempty"` // Time in HH:MM format or "now"
 }
 
 type Resp struct {
 	Ok    bool    `json:"ok"`
 	Msg   string  `json:"msg,omitempty"`
 	Max   float64 `json:"max,omitempty"`
-	Min   float64 `json:"min,omitempty"`
 	Pct   float64 `json:"pct,omitempty"`
 	State string  `json:"state,omitempty"`
 	Cons  int     `json:"cons,omitempty"`
+	Time  string  `json:"time,omitempty"` // Target time or "now"
 }
 
 func main() {
 	cfg := parseFlags()
 
-	if cfg.MinPercent >= cfg.MaxPercent {
-		exitErr(errors.New("min must be < max"))
-	}
 	if cfg.MaxPercent < 80 || cfg.MaxPercent > 100 {
 		exitErr(fmt.Errorf("max must be in [80,100], got %.1f", cfg.MaxPercent))
-	}
-	if cfg.MinPercent < 50 || cfg.MinPercent > 99 {
-		exitErr(fmt.Errorf("min must be in [50,99], got %.1f", cfg.MinPercent))
 	}
 
 	conspath := cfg.SysfsPath
@@ -153,7 +150,6 @@ func main() {
 func parseFlags() Config {
     showVersion := flag.Bool("version", false, "print version and exit")
 	max := flag.Float64("max", 80, "target maximum percentage to start capping (80..100)")
-	min := flag.Float64("min", 75, "target minimum percentage to resume charging (50..99)")
 	interval := flag.Duration("interval", 45*time.Second, "poll interval")
 	dry := flag.Bool("dry-run", false, "do not write sysfs, only log actions")
 	once := flag.Bool("once", false, "perform a single control step and exit")
@@ -168,7 +164,6 @@ func parseFlags() Config {
     }
 	return Config{
 		MaxPercent:   *max,
-		MinPercent:   *min,
 		PollInterval: *interval,
 		DryRun:       *dry,
 		Once:         *once,
@@ -204,18 +199,81 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 	action := "none"
 	want := cur
 
-	switch {
-	case (pct >= cfg.MaxPercent || cfg.MaxPercent <= 80) && cur == 0:
-		want = 1
-		action = "enable_conservation"
-	case cfg.MaxPercent > 80 && pct <= cfg.MinPercent && cur == 1:
-		want = 0
-		action = "disable_conservation"
-	default:
+	// Check if we've reached the target level
+	if !cfg.LevelReached && pct >= cfg.MaxPercent {
+		st.mu.Lock()
+		st.cfg.LevelReached = true
+		st.mu.Unlock()
 	}
 
-	logf("pct=%.1f state=%s conservation=%d action=%s thresholds=%.1f/%.1f",
-		pct, stateString(state), cur, action, cfg.MinPercent, cfg.MaxPercent)
+	if cfg.TargetTime != nil {
+		// Time-based charging logic
+		now := time.Now()
+		target := *cfg.TargetTime
+		
+		// Calculate when to start charging (assuming 1 minute per 1%)
+		chargingTimeNeeded := time.Duration(cfg.MaxPercent-pct) * time.Minute
+		startTime := target.Add(-chargingTimeNeeded)
+		
+		logf("schedule mode: target=%.1f%% at %s, current=%.1f%%, start_time=%s, level_reached=%t", 
+			cfg.MaxPercent, target.Format("2006-01-02 15:04"), pct, startTime.Format("15:04"), cfg.LevelReached)
+		
+		switch {
+		case cfg.LevelReached:
+			// Level reached - keep conservation enabled and clear schedule if target time passed
+			want = 1
+			action = "enable_conservation_level_reached"
+			if now.After(target) {
+				st.mu.Lock()
+				st.cfg.TargetTime = nil
+				st.mu.Unlock()
+				action = "enable_conservation_schedule_completed"
+			}
+		case now.After(target):
+			// Target time passed but level not reached - clear schedule
+			st.mu.Lock()
+			st.cfg.TargetTime = nil
+			st.mu.Unlock()
+			logf("target time passed without reaching level, clearing schedule")
+			// Apply immediate mode logic
+			if pct >= cfg.MaxPercent {
+				want = 1
+				action = "enable_conservation_immediate"
+			} else {
+				want = 0
+				action = "disable_conservation_immediate"
+			}
+		case now.After(startTime):
+			// Time to start charging
+			want = 0
+			action = "disable_conservation_scheduled_charging"
+		case pct >= cfg.MaxPercent:
+			// Reached target percentage - enable conservation and mark level reached
+			want = 1
+			action = "enable_conservation_target_percentage_reached"
+			st.mu.Lock()
+			st.cfg.LevelReached = true
+			st.mu.Unlock()
+		default:
+			// Not time to charge yet - enable conservation to wait
+			want = 1
+			action = "enable_conservation_waiting_for_schedule"
+		}
+	} else {
+		// Immediate charging logic
+		if cfg.LevelReached {
+			// Level reached - keep conservation enabled
+			want = 1
+			action = "enable_conservation_level_reached"
+		} else {
+			// Level not reached yet - disable conservation to charge
+			want = 0
+			action = "disable_conservation_charging_to_target"
+		}
+	}
+
+	logf("pct=%.1f state=%s conservation=%d action=%s target=%.1f level_reached=%t",
+		pct, stateString(state), cur, action, cfg.MaxPercent, cfg.LevelReached)
 
 	if want != cur {
 		if cfg.DryRun {
@@ -280,30 +338,46 @@ func handleConn(c net.Conn, st *SharedState) {
 	case "set":
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		if r.Min >= r.Max {
-			_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: "min must be < max"})
-			return
-		}
 		if r.Max < 80 || r.Max > 100 {
 			_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: "max must be 80..100"})
 			return
 		}
-		if r.Min < 50 || r.Min > 99 {
-			_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: "min must be 50..99"})
-			return
+		
+		// Handle time parameter
+		if r.Time != "" && r.Time != "now" {
+			targetTime, err := parseTimeString(r.Time)
+			if err != nil {
+				_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: fmt.Sprintf("invalid time format: %v", err)})
+				return
+			}
+			st.cfg.TargetTime = &targetTime
+		} else {
+			// Time is "now" or not specified - immediate mode
+			st.cfg.TargetTime = nil
 		}
+		
 		st.cfg.MaxPercent = r.Max
-		st.cfg.MinPercent = r.Min
-		_ = json.NewEncoder(c).Encode(Resp{Ok: true, Max: st.cfg.MaxPercent, Min: st.cfg.MinPercent})
+		st.cfg.LevelReached = false // Reset level reached on new configuration
+		
+		timeStr := "now"
+		if st.cfg.TargetTime != nil {
+			timeStr = st.cfg.TargetTime.Format("15:04")
+		}
+		
+		_ = json.NewEncoder(c).Encode(Resp{Ok: true, Max: st.cfg.MaxPercent, Time: timeStr})
 	case "get", "status":
 		st.mu.Lock()
+		timeStr := "now"
+		if st.cfg.TargetTime != nil {
+			timeStr = st.cfg.TargetTime.Format("15:04")
+		}
 		resp := Resp{
 			Ok:    true,
 			Max:   st.cfg.MaxPercent,
-			Min:   st.cfg.MinPercent,
 			Pct:   st.pct,
 			State: stateString(st.bstate),
 			Cons:  st.cons,
+			Time:  timeStr,
 		}
 		st.mu.Unlock()
 		_ = json.NewEncoder(c).Encode(resp)
@@ -423,6 +497,29 @@ func writeConservation(path string, v int) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+func parseTimeString(timeStr string) (time.Time, error) {
+	if timeStr == "now" {
+		return time.Now(), nil
+	}
+	
+	// Parse HH:MM format
+	now := time.Now()
+	t, err := time.Parse("15:04", timeStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("time must be in HH:MM format, got %s", timeStr)
+	}
+	
+	// Set the date to today but with the specified time
+	target := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	
+	// If target time is in the past (or very close), assume user means tomorrow
+	if target.Before(now.Add(time.Minute)) {
+		target = target.Add(24 * time.Hour)
+	}
+	
+	return target, nil
 }
 
 func logf(f string, a ...any) {
