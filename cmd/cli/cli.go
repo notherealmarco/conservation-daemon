@@ -32,7 +32,7 @@ func main() {
 	sock := flag.String("sock", "/run/conservationd/conservationd.sock", "control socket path")
 	doSet := flag.Bool("set", false, "set thresholds")
 	max := flag.Float64("max", 80, "new max")
-	min := flag.Float64("min", 75, "new min")
+	min := flag.Float64("min", 0, "new min (defaults to max-5 if not specified)")
 	status := flag.Bool("status", false, "show current status")
 	flag.Parse()
 
@@ -41,10 +41,27 @@ func main() {
         os.Exit(0)
     }
 
+	// Check if min flag was explicitly set by checking if it's still the default value
+	// and if so, set it to max - 5
+	minValue := *min
+	if *min == 0 {
+		// Check if min was explicitly set to 0 by looking at the command line args
+		minExplicitlySet := false
+		for _, arg := range os.Args[1:] {
+			if arg == "-min" || arg == "--min" {
+				minExplicitlySet = true
+				break
+			}
+		}
+		if !minExplicitlySet {
+			minValue = *max - 5
+		}
+	}
+
 	var req Req
 	switch {
 	case *doSet:
-		req = Req{Cmd: "set", Max: *max, Min: *min}
+		req = Req{Cmd: "set", Max: *max, Min: minValue}
 	case *status:
 		req = Req{Cmd: "status"}
 	default:
