@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-// conservationd: Software charge controller for Lenovo Yoga/IdeaPad on Linux.
 // Requires: UPower daemon, ideapad_laptop kernel module.
 // Caveat: Conservation mode is binary and typically targets ~80% when enabled.
 
@@ -45,11 +44,12 @@ const (
 )
 
 type Config struct {
-	MaxPercent   float64
-	PollInterval time.Duration
-	DryRun       bool
-	Once         bool
-	SysfsPath    string
+	MaxPercent            float64
+	ConservationThreshold float64
+	PollInterval          time.Duration
+	DryRun                bool
+	Once                  bool
+	SysfsPath             string
 
 	// Control socket
 	SockPath  string
@@ -88,8 +88,11 @@ type Resp struct {
 func main() {
 	cfg := parseFlags()
 
-	if cfg.MaxPercent < 80 || cfg.MaxPercent > 100 {
-		exitErr(fmt.Errorf("max must be in [80,100], got %.1f", cfg.MaxPercent))
+	if cfg.MaxPercent < cfg.ConservationThreshold || cfg.MaxPercent > 100 {
+		exitErr(fmt.Errorf("max must be in [%.1f,100], got %.1f", cfg.ConservationThreshold, cfg.MaxPercent))
+	}
+	if cfg.ConservationThreshold < 50 || cfg.ConservationThreshold > 100 {
+		exitErr(fmt.Errorf("conservation-threshold must be in [50,100], got %.1f", cfg.ConservationThreshold))
 	}
 
 	conspath := cfg.SysfsPath
@@ -150,6 +153,7 @@ func main() {
 func parseFlags() Config {
     showVersion := flag.Bool("version", false, "print version and exit")
 	max := flag.Float64("max", 80, "target maximum percentage to start capping (80..100)")
+	conservationThreshold := flag.Float64("conservation-threshold", 80, "battery percentage at which conservation mode activates (default varies by laptop model)")
 	interval := flag.Duration("interval", 45*time.Second, "poll interval")
 	dry := flag.Bool("dry-run", false, "do not write sysfs, only log actions")
 	once := flag.Bool("once", false, "perform a single control step and exit")
@@ -163,13 +167,14 @@ func parseFlags() Config {
         os.Exit(0)
     }
 	return Config{
-		MaxPercent:   *max,
-		PollInterval: *interval,
-		DryRun:       *dry,
-		Once:         *once,
-		SysfsPath:    *sysfs,
-		SockPath:     *sock,
-		SockGroup:    *sockGroup,
+		MaxPercent:            *max,
+		ConservationThreshold: *conservationThreshold,
+		PollInterval:          *interval,
+		DryRun:                *dry,
+		Once:                  *once,
+		SysfsPath:             *sysfs,
+		SockPath:              *sock,
+		SockGroup:             *sockGroup,
 	}
 }
 
@@ -199,14 +204,19 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 	action := "none"
 	want := cur
 
-	// Check if we've reached the target level
-	if !cfg.LevelReached && pct >= cfg.MaxPercent {
-		st.mu.Lock()
-		st.cfg.LevelReached = true
-		st.mu.Unlock()
-	}
+	// If max percentage is at or below conservation threshold, always enable conservation
+	if cfg.MaxPercent <= cfg.ConservationThreshold {
+		want = 1
+		action = "enable_conservation_threshold_mode"
+	} else {
+		// Check if we've reached the target level
+		if !cfg.LevelReached && pct >= cfg.MaxPercent {
+			st.mu.Lock()
+			st.cfg.LevelReached = true
+			st.mu.Unlock()
+		}
 
-	if cfg.TargetTime != nil {
+		if cfg.TargetTime != nil {
 		// Time-based charging logic
 		now := time.Now()
 		target := *cfg.TargetTime
@@ -259,16 +269,17 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 			want = 1
 			action = "enable_conservation_waiting_for_schedule"
 		}
-	} else {
-		// Immediate charging logic
-		if cfg.LevelReached {
-			// Level reached - keep conservation enabled
-			want = 1
-			action = "enable_conservation_level_reached"
 		} else {
-			// Level not reached yet - disable conservation to charge
-			want = 0
-			action = "disable_conservation_charging_to_target"
+			// Immediate charging logic
+			if cfg.LevelReached {
+				// Level reached - keep conservation enabled
+				want = 1
+				action = "enable_conservation_level_reached"
+			} else {
+				// Level not reached yet - disable conservation to charge
+				want = 0
+				action = "disable_conservation_charging_to_target"
+			}
 		}
 	}
 
@@ -338,8 +349,8 @@ func handleConn(c net.Conn, st *SharedState) {
 	case "set":
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		if r.Max < 80 || r.Max > 100 {
-			_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: "max must be 80..100"})
+		if r.Max < st.cfg.ConservationThreshold || r.Max > 100 {
+			_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: fmt.Sprintf("max must be %.1f..100", st.cfg.ConservationThreshold)})
 			return
 		}
 		
