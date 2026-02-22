@@ -41,10 +41,23 @@ builds:
     goarch:
       - amd64
       # - arm64
+  - id: conservation-tray
+    main: ./cmd/tray
+    binary: conservation-tray
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -mod=vendor
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+    goarch:
+      - amd64
 
 archives:
   - id: conservation-archive
-    ids: [conservationd, conservationctl]
+    ids: [conservationd, conservationctl, conservation-tray]
     name_template: "conservation-daemon_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [ 'tar.gz']
     files: []
@@ -60,17 +73,24 @@ nfpms:
     homepage: "https://git.marcorealacci.me/marcorealacci/conservation-daemon"
     dependencies:
       - upower
+      - gtk3
+      - libayatana-appindicator
+      - zenity
     provides:
       - conservationd
       - conservationctl
+      - conservation-tray
     conflicts: []
     ids:
       - conservationd
       - conservationctl
+      - conservation-tray
     bindir: /usr/bin
     contents:
       - src: ./packaging/systemd/conservationd.service
         dst: /usr/lib/systemd/system/conservationd.service
+      - src: ./packaging/systemd/conservation-tray.service
+        dst: /usr/lib/systemd/user/conservation-tray.service
     scripts:
       postinstall: ./packaging/scripts/postinstall.sh
       preremove: ./packaging/scripts/preremove.sh
@@ -114,9 +134,9 @@ aurs:
     maintainers:
       - Marco Realacci <marco@marcorealacci.me>
     license: MIT
-    provides: [conservation-daemon, conservationd, conservationctl]
+    provides: [conservation-daemon, conservationd, conservationctl, conservation-tray]
     conflicts: [conservation-daemon]
-    depends: [upower]
+    depends: [upower, gtk3, libayatana-appindicator, zenity]
     # Fill this with your actual AUR repo when ready and set a private_key env var
     git_url: "ssh://aur@aur.archlinux.org/conservation-daemon-bin.git"
     private_key: "{{ .Env.AUR_PRIVATE_KEY }}"
@@ -127,7 +147,8 @@ aurs:
     package: |-
       install -Dm755 "./conservationd" "${pkgdir}/usr/bin/conservationd"
       install -Dm755 "./conservationctl" "${pkgdir}/usr/bin/conservationctl"
-      # Write systemd unit file
+      install -Dm755 "./conservation-tray" "${pkgdir}/usr/bin/conservation-tray"
+      # System-level daemon service
       install -d "${pkgdir}/usr/lib/systemd/system"
       printf '%s\n' \
         '[Unit]' \
@@ -141,11 +162,30 @@ aurs:
         'Restart=on-failure' \
         'RestartSec=5s' \
         'RuntimeDirectory=conservationd' \
+        'StateDirectory=conservationd' \
         'Group=conservationd' \
         'RuntimeDirectoryMode=0770' \
+        'StateDirectoryMode=0755' \
         '' \
         '[Install]' \
         'WantedBy=multi-user.target' \
         > "${pkgdir}/usr/lib/systemd/system/conservationd.service"
+      # User-level tray service
+      install -d "${pkgdir}/usr/lib/systemd/user"
+      printf '%s\n' \
+        '[Unit]' \
+        'Description=Battery Conservation Tray Icon' \
+        'After=graphical-session.target' \
+        'PartOf=graphical-session.target' \
+        '' \
+        '[Service]' \
+        'Type=simple' \
+        'ExecStart=/usr/bin/conservation-tray' \
+        'Restart=on-failure' \
+        'RestartSec=5s' \
+        '' \
+        '[Install]' \
+        'WantedBy=graphical-session.target' \
+        > "${pkgdir}/usr/lib/systemd/user/conservation-tray.service"
     # Include a .install file to manage systemd
     install: ./packaging/aur/conservationd.install
