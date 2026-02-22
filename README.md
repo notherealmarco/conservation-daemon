@@ -7,6 +7,7 @@ A simple smart charge controller for Lenovo Yoga/IdeaPad laptops on Linux that h
 - Linux system with UPower daemon
 - Lenovo laptop with `ideapad_laptop` kernel module loaded
 - Conservation mode support in `/sys/bus/platform/drivers/ideapad_acpi/*/conservation_mode`
+- For the tray icon: `gtk3`, `libayatana-appindicator`, and `zenity`
 
 ## Installation
 
@@ -70,9 +71,28 @@ conservationctl -set -max 95 -time 9:00
 
 ### Run the tray icon
 ```bash
-./conservation-tray
-# We recommend adding it to your desktop environment startup applications!
+# One-time: enable the user service
+systemctl --user enable --now conservation-tray
+
+# Or run manually:
+conservation-tray
 ```
+
+### Auto Mode
+
+Auto mode enables/disables conservation based on external display connection:
+- **External display connected** → conservation ON (you're at a desk)
+- **No external display** → conservation OFF (you're mobile, let it charge)
+
+```bash
+# Enable auto mode
+conservationctl -set -auto
+
+# Disable auto mode
+conservationctl -set
+```
+
+Auto mode state persists across daemon restarts via the state file.
 
 ### Daemon Options
 
@@ -94,6 +114,10 @@ conservationctl -set -max 95 -time 9:00
         UNIX control socket path (default "/run/conservationd/conservationd.sock")
   -sock-group string
         group name to own the socket (default "conservationd")
+  -auto
+        enable conservation based on external display connection
+  -state string
+        path to persist runtime state (default "/var/lib/conservationd/state.json")
   -version
         print version and exit
 ```
@@ -112,6 +136,8 @@ conservationctl -set -max 95 -time 9:00
         show detailed status (same as default behavior)
   -sock string
         control socket path (default "/run/conservationd/conservationd.sock")
+  -auto
+        enable auto mode (display sensing)
   -version
         print version and exit
 ```

@@ -59,6 +59,9 @@ type Config struct {
 	// Time-based charging
 	TargetTime   *time.Time
 	LevelReached bool // true when target percentage has been reached
+
+	// State file
+	StatePath string
 }
 
 type SharedState struct {
@@ -125,6 +128,15 @@ func main() {
 	// Shared state for control-plane
 	st := &SharedState{cfg: cfg}
 
+	// Load persisted state (overrides CLI defaults for auto/max)
+	if cfg.StatePath != "" {
+		if err := loadState(cfg.StatePath, &st.cfg); err != nil {
+			logf("load state: %v (using defaults)", err)
+		} else {
+			logf("loaded persisted state: auto=%t max=%.1f", st.cfg.Auto, st.cfg.MaxPercent)
+		}
+	}
+
 	// Start control socket (unless Once mode)
 	var ln net.Listener
 	if !cfg.Once && cfg.SockPath != "" {
@@ -164,6 +176,7 @@ func parseFlags() Config {
 	sysfs := flag.String("sysfs", "", "explicit conservation_mode path; auto-discover if empty")
 	sock := flag.String("sock", "/run/conservationd/conservationd.sock", "UNIX control socket path ('' to disable)")
 	sockGroup := flag.String("sock-group", "conservationd", "group name to own the socket (0660)")
+	statePath := flag.String("state", "/var/lib/conservationd/state.json", "path to persist runtime state ('' to disable)")
 	flag.Parse()
 
 	if *showVersion {
@@ -180,6 +193,7 @@ func parseFlags() Config {
 		SysfsPath:             *sysfs,
 		SockPath:              *sock,
 		SockGroup:             *sockGroup,
+		StatePath:             *statePath,
 	}
 }
 
@@ -355,6 +369,45 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 	st.mu.Unlock()
 }
 
+// persistedState is the subset of Config that survives daemon restarts.
+type persistedState struct {
+	Auto bool    `json:"auto"`
+	Max  float64 `json:"max"`
+}
+
+func loadState(path string, cfg *Config) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var ps persistedState
+	if err := json.Unmarshal(data, &ps); err != nil {
+		return err
+	}
+	cfg.Auto = ps.Auto
+	if ps.Max >= cfg.ConservationThreshold && ps.Max <= 100 {
+		cfg.MaxPercent = ps.Max
+	}
+	return nil
+}
+
+func saveState(path string, cfg Config) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	ps := persistedState{Auto: cfg.Auto, Max: cfg.MaxPercent}
+	data, err := json.Marshal(ps)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func setupSocket(sockPath, group string) (net.Listener, error) {
 	dir := filepath.Dir(sockPath)
 	if err := os.MkdirAll(dir, 0o770); err != nil {
@@ -431,6 +484,13 @@ func handleConn(c net.Conn, st *SharedState) {
 		}
 
 		_ = json.NewEncoder(c).Encode(Resp{Ok: true, Max: st.cfg.MaxPercent, Time: timeStr, Auto: st.cfg.Auto})
+
+		// Persist state to disk
+		if st.cfg.StatePath != "" {
+			if err := saveState(st.cfg.StatePath, st.cfg); err != nil {
+				logf("save state: %v", err)
+			}
+		}
 	case "get", "status":
 		st.mu.Lock()
 		timeStr := "now"

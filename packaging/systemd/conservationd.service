@@ -1,17 +1,19 @@
 [Unit]
 Description=Battery Conservation Mode Daemon (Lenovo Yoga/IdeaPad)
-Documentation=https://github.com/your-org/conservationDaemon
+Documentation=https://git.marcorealacci.me/marcorealacci/conservation-daemon
 After=network.target dbus.service upower.service
 Wants=upower.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/conservationd -max 80 -min 75 -interval 45s
+ExecStart=/usr/bin/conservationd
 Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=conservationd
+StateDirectory=conservationd
 Group=conservationd
 RuntimeDirectoryMode=0770
+StateDirectoryMode=0755
 
 [Install]
 WantedBy=multi-user.target

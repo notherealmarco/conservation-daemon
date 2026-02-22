@@ -132,7 +132,7 @@ func onReady() {
 
 	systray.AddSeparator()
 	mConfigure := systray.AddMenuItem("Configure Conservation", "Set Max % and Target Time")
-	mToggleAuto := systray.AddMenuItemCheckbox("Auto Mode (Display)", "Toggle display-based auto mode", false)
+	mToggleAuto := systray.AddMenuItemCheckbox("Auto Mode (Enable on external display)", "Toggle display-based auto mode", false)
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit Tray", "Exit tray applet")
 
