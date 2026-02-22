@@ -16,6 +16,7 @@ type Req struct {
 	Cmd  string  `json:"cmd"`
 	Max  float64 `json:"max,omitempty"`
 	Time string  `json:"time,omitempty"`
+	Auto *bool   `json:"auto,omitempty"`
 }
 type Resp struct {
 	Ok    bool    `json:"ok"`
@@ -25,6 +26,7 @@ type Resp struct {
 	State string  `json:"state,omitempty"`
 	Cons  int     `json:"cons,omitempty"`
 	Time  string  `json:"time,omitempty"`
+	Auto  bool    `json:"auto,omitempty"`
 }
 
 func main() {
@@ -33,6 +35,7 @@ func main() {
 	doSet := flag.Bool("set", false, "set thresholds")
 	max := flag.Float64("max", 80, "target maximum percentage (80..100)")
 	timeFlag := flag.String("time", "", "target time in HH:MM format for scheduled charging (defaults to 'now')")
+	auto := flag.Bool("auto", false, "enable auto mode (display connection based)")
 	status := flag.Bool("status", false, "show current status")
 	flag.Parse()
 
@@ -51,6 +54,7 @@ func main() {
 	switch {
 	case *doSet:
 		req = Req{Cmd: "set", Max: *max, Time: timeValue}
+		req.Auto = auto
 	case *status:
 		req = Req{Cmd: "status"}
 	default:
@@ -80,9 +84,17 @@ func main() {
 	}
 	switch req.Cmd {
 	case "set":
-		fmt.Printf("max=%.1f time=%s\n", resp.Max, resp.Time)
+		autoStr := "false"
+		if resp.Auto {
+			autoStr = "true"
+		}
+		fmt.Printf("max=%.1f time=%s auto=%s\n", resp.Max, resp.Time, autoStr)
 	case "status", "get":
-		fmt.Printf("pct=%.1f state=%s cons=%d max=%.1f time=%s\n", resp.Pct, resp.State, resp.Cons, resp.Max, resp.Time)
+		autoStr := "false"
+		if resp.Auto {
+			autoStr = "true"
+		}
+		fmt.Printf("pct=%.1f state=%s cons=%d max=%.1f time=%s auto=%s\n", resp.Pct, resp.State, resp.Cons, resp.Max, resp.Time, autoStr)
 	}
 }
 

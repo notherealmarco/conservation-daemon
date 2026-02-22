@@ -13,9 +13,9 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"runtime"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,9 +27,9 @@ import (
 
 // Version metadata injected at build time via -ldflags
 var (
-    version = "dev"
-    commit  = "none"
-    date    = "unknown"
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 type BatteryState uint32
@@ -49,6 +49,7 @@ type Config struct {
 	PollInterval          time.Duration
 	DryRun                bool
 	Once                  bool
+	Auto                  bool
 	SysfsPath             string
 
 	// Control socket
@@ -73,6 +74,7 @@ type Req struct {
 	Cmd  string  `json:"cmd"`
 	Max  float64 `json:"max,omitempty"`
 	Time string  `json:"time,omitempty"` // Time in HH:MM format or "now"
+	Auto *bool   `json:"auto,omitempty"`
 }
 
 type Resp struct {
@@ -83,6 +85,7 @@ type Resp struct {
 	State string  `json:"state,omitempty"`
 	Cons  int     `json:"cons,omitempty"`
 	Time  string  `json:"time,omitempty"` // Target time or "now"
+	Auto  bool    `json:"auto,omitempty"`
 }
 
 func main() {
@@ -151,27 +154,29 @@ func main() {
 }
 
 func parseFlags() Config {
-    showVersion := flag.Bool("version", false, "print version and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	max := flag.Float64("max", 80, "target maximum percentage to start capping (80..100)")
 	conservationThreshold := flag.Float64("conservation-threshold", 80, "battery percentage at which conservation mode activates (default varies by laptop model)")
 	interval := flag.Duration("interval", 45*time.Second, "poll interval")
 	dry := flag.Bool("dry-run", false, "do not write sysfs, only log actions")
 	once := flag.Bool("once", false, "perform a single control step and exit")
+	auto := flag.Bool("auto", false, "enable/disable conservation mode based on external monitor connection status")
 	sysfs := flag.String("sysfs", "", "explicit conservation_mode path; auto-discover if empty")
 	sock := flag.String("sock", "/run/conservationd/conservationd.sock", "UNIX control socket path ('' to disable)")
 	sockGroup := flag.String("sock-group", "conservationd", "group name to own the socket (0660)")
 	flag.Parse()
 
-    if *showVersion {
-        fmt.Printf("conservationd %s (commit %s, built %s) %s/%s\n", version, commit, date, runtime.GOOS, runtime.GOARCH)
-        os.Exit(0)
-    }
+	if *showVersion {
+		fmt.Printf("conservationd %s (commit %s, built %s) %s/%s\n", version, commit, date, runtime.GOOS, runtime.GOARCH)
+		os.Exit(0)
+	}
 	return Config{
 		MaxPercent:            *max,
 		ConservationThreshold: *conservationThreshold,
 		PollInterval:          *interval,
 		DryRun:                *dry,
 		Once:                  *once,
+		Auto:                  *auto,
 		SysfsPath:             *sysfs,
 		SockPath:              *sock,
 		SockGroup:             *sockGroup,
@@ -204,6 +209,16 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 	action := "none"
 	want := cur
 
+	// Determine base desired state from auto mode
+	extConn := false
+	if cfg.Auto {
+		var err error
+		extConn, err = isExternalDisplayConnected()
+		if err != nil {
+			logf("check external display error: %v", err)
+		}
+	}
+
 	// If max percentage is at or below conservation threshold, always enable conservation
 	if cfg.MaxPercent <= cfg.ConservationThreshold {
 		want = 1
@@ -214,61 +229,79 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 			st.mu.Lock()
 			st.cfg.LevelReached = true
 			st.mu.Unlock()
+			cfg.LevelReached = true
 		}
 
 		if cfg.TargetTime != nil {
-		// Time-based charging logic
-		now := time.Now()
-		target := *cfg.TargetTime
-		
-		// Calculate when to start charging (assuming 1 minute per 1%)
-		chargingTimeNeeded := time.Duration(cfg.MaxPercent-pct) * time.Minute
-		startTime := target.Add(-chargingTimeNeeded)
-		
-		logf("schedule mode: target=%.1f%% at %s, current=%.1f%%, start_time=%s, level_reached=%t", 
-			cfg.MaxPercent, target.Format("2006-01-02 15:04"), pct, startTime.Format("15:04"), cfg.LevelReached)
-		
-		switch {
-		case cfg.LevelReached:
-			// Level reached - keep conservation enabled and clear schedule if target time passed
-			want = 1
-			action = "enable_conservation_level_reached"
-			if now.After(target) {
+			// Time-based charging logic
+			now := time.Now()
+			target := *cfg.TargetTime
+
+			// Calculate when to start charging (assuming 1 minute per 1%)
+			chargingTimeNeeded := time.Duration(cfg.MaxPercent-pct) * time.Minute
+			startTime := target.Add(-chargingTimeNeeded)
+
+			logf("schedule mode: target=%.1f%% at %s, current=%.1f%%, start_time=%s, level_reached=%t",
+				cfg.MaxPercent, target.Format("2006-01-02 15:04"), pct, startTime.Format("15:04"), cfg.LevelReached)
+
+			switch {
+			case cfg.LevelReached:
+				// Level reached - keep conservation enabled and clear schedule if target time passed
+				want = 1
+				action = "enable_conservation_level_reached"
+				if now.After(target) {
+					st.mu.Lock()
+					st.cfg.TargetTime = nil
+					st.mu.Unlock()
+					action = "enable_conservation_schedule_completed"
+				}
+			case now.After(target):
+				// Target time passed but level not reached - clear schedule
 				st.mu.Lock()
 				st.cfg.TargetTime = nil
 				st.mu.Unlock()
-				action = "enable_conservation_schedule_completed"
-			}
-		case now.After(target):
-			// Target time passed but level not reached - clear schedule
-			st.mu.Lock()
-			st.cfg.TargetTime = nil
-			st.mu.Unlock()
-			logf("target time passed without reaching level, clearing schedule")
-			// Apply immediate mode logic
-			if pct >= cfg.MaxPercent {
-				want = 1
-				action = "enable_conservation_immediate"
-			} else {
+				logf("target time passed without reaching level, clearing schedule")
+				// Apply immediate logic
+				if cfg.Auto {
+					if extConn {
+						want = 1
+						action = "enable_conservation_display_connected"
+					} else {
+						want = 0
+						action = "disable_conservation_display_disconnected"
+					}
+				} else {
+					if pct >= cfg.MaxPercent {
+						want = 1
+						action = "enable_conservation_immediate"
+					} else {
+						want = 0
+						action = "disable_conservation_immediate"
+					}
+				}
+			case now.After(startTime):
+				// Time to start charging
 				want = 0
-				action = "disable_conservation_immediate"
+				action = "disable_conservation_scheduled_charging"
+			case pct >= cfg.MaxPercent:
+				// Reached target percentage - enable conservation and mark level reached
+				want = 1
+				action = "enable_conservation_target_percentage_reached"
+				st.mu.Lock()
+				st.cfg.LevelReached = true
+				st.mu.Unlock()
+			default:
+				// Not time to charge yet
+				if cfg.Auto && !extConn {
+					// Auto mode: monitor disconnected, force conservation off
+					want = 0
+					action = "disable_conservation_display_disconnected"
+				} else {
+					// Either Auto mode with display connected, or normal schedule waiting
+					want = 1
+					action = "enable_conservation_waiting_for_schedule"
+				}
 			}
-		case now.After(startTime):
-			// Time to start charging
-			want = 0
-			action = "disable_conservation_scheduled_charging"
-		case pct >= cfg.MaxPercent:
-			// Reached target percentage - enable conservation and mark level reached
-			want = 1
-			action = "enable_conservation_target_percentage_reached"
-			st.mu.Lock()
-			st.cfg.LevelReached = true
-			st.mu.Unlock()
-		default:
-			// Not time to charge yet - enable conservation to wait
-			want = 1
-			action = "enable_conservation_waiting_for_schedule"
-		}
 		} else {
 			// Immediate charging logic
 			if cfg.LevelReached {
@@ -276,9 +309,19 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 				want = 1
 				action = "enable_conservation_level_reached"
 			} else {
-				// Level not reached yet - disable conservation to charge
-				want = 0
-				action = "disable_conservation_charging_to_target"
+				if cfg.Auto {
+					if extConn {
+						want = 1
+						action = "enable_conservation_display_connected"
+					} else {
+						want = 0
+						action = "disable_conservation_display_disconnected"
+					}
+				} else {
+					// Level not reached yet - disable conservation to charge
+					want = 0
+					action = "disable_conservation_charging_to_target"
+				}
 			}
 		}
 	}
@@ -353,7 +396,7 @@ func handleConn(c net.Conn, st *SharedState) {
 			_ = json.NewEncoder(c).Encode(Resp{Ok: false, Msg: fmt.Sprintf("max must be %.1f..100", st.cfg.ConservationThreshold)})
 			return
 		}
-		
+
 		// Handle time parameter
 		if r.Time != "" && r.Time != "now" {
 			targetTime, err := parseTimeString(r.Time)
@@ -366,16 +409,20 @@ func handleConn(c net.Conn, st *SharedState) {
 			// Time is "now" or not specified - immediate mode
 			st.cfg.TargetTime = nil
 		}
-		
+
 		st.cfg.MaxPercent = r.Max
 		st.cfg.LevelReached = false // Reset level reached on new configuration
-		
+
+		if r.Auto != nil {
+			st.cfg.Auto = *r.Auto
+		}
+
 		timeStr := "now"
 		if st.cfg.TargetTime != nil {
 			timeStr = st.cfg.TargetTime.Format("15:04")
 		}
-		
-		_ = json.NewEncoder(c).Encode(Resp{Ok: true, Max: st.cfg.MaxPercent, Time: timeStr})
+
+		_ = json.NewEncoder(c).Encode(Resp{Ok: true, Max: st.cfg.MaxPercent, Time: timeStr, Auto: st.cfg.Auto})
 	case "get", "status":
 		st.mu.Lock()
 		timeStr := "now"
@@ -389,6 +436,7 @@ func handleConn(c net.Conn, st *SharedState) {
 			State: stateString(st.bstate),
 			Cons:  st.cons,
 			Time:  timeStr,
+			Auto:  st.cfg.Auto,
 		}
 		st.mu.Unlock()
 		_ = json.NewEncoder(c).Encode(resp)
@@ -421,6 +469,29 @@ func findDisplayBattery(ctx context.Context, conn *dbus.Conn) (dbus.ObjectPath, 
 		return "", fmt.Errorf("GetDisplayDevice: %w", err)
 	}
 	return path, nil
+}
+
+func isExternalDisplayConnected() (bool, error) {
+	dirs, err := filepath.Glob("/sys/class/drm/*/status")
+	if err != nil {
+		return false, err
+	}
+	for _, statusFile := range dirs {
+		dir := filepath.Base(filepath.Dir(statusFile))
+		// skip internal displays
+		if strings.Contains(dir, "eDP") || strings.Contains(dir, "LVDS") || strings.Contains(dir, "DSI") {
+			continue
+		}
+
+		b, err := os.ReadFile(statusFile)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(string(b), "connected") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func readUPower(ctx context.Context, conn *dbus.Conn, path dbus.ObjectPath) (percent float64, state BatteryState, err error) {
@@ -514,22 +585,22 @@ func parseTimeString(timeStr string) (time.Time, error) {
 	if timeStr == "now" {
 		return time.Now(), nil
 	}
-	
+
 	// Parse HH:MM format
 	now := time.Now()
 	t, err := time.Parse("15:04", timeStr)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("time must be in HH:MM format, got %s", timeStr)
 	}
-	
+
 	// Set the date to today but with the specified time
 	target := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
-	
+
 	// If target time is in the past (or very close), assume user means tomorrow
 	if target.Before(now.Add(time.Minute)) {
 		target = target.Add(24 * time.Hour)
 	}
-	
+
 	return target, nil
 }
 
