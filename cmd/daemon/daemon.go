@@ -219,10 +219,16 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 		}
 	}
 
-	// If max percentage is at or below conservation threshold, always enable conservation
+	// If max percentage is at or below conservation threshold, enable conservation
+	// BUT if auto mode is on, defer to the display connection status
 	if cfg.MaxPercent <= cfg.ConservationThreshold {
-		want = 1
-		action = "enable_conservation_threshold_mode"
+		if cfg.Auto && !extConn {
+			want = 0
+			action = "disable_conservation_display_disconnected"
+		} else {
+			want = 1
+			action = "enable_conservation_threshold_mode"
+		}
 	} else {
 		// Check if we've reached the target level
 		if !cfg.LevelReached && pct >= cfg.MaxPercent {
@@ -359,12 +365,14 @@ func setupSocket(sockPath, group string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
-	// chgrp and chmod socket
+	// chgrp directory and socket so group members can connect
 	if g, err := user.LookupGroup(group); err == nil {
 		if gid, err2 := strconv.Atoi(g.Gid); err2 == nil {
+			_ = syscall.Chown(dir, 0, gid)
 			_ = syscall.Chown(sockPath, 0, gid)
 		}
 	}
+	_ = os.Chmod(dir, 0o750)
 	_ = os.Chmod(sockPath, 0o660)
 	logf("control socket listening at %s (group %s, mode 0660)", sockPath, group)
 	return ln, nil

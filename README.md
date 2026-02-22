@@ -37,6 +37,7 @@ git clone <repository-url>
 cd conservationDaemon
 go build -o conservationd ./cmd/daemon   # Builds daemon executable
 go build -o conservationctl ./cmd/cli    # Builds cli executable
+go build -o conservation-tray ./cmd/tray # Builds tray executable
 ```
 
 ## Usage
@@ -65,6 +66,12 @@ conservationctl -set -max 90
 conservationctl -set -max 95 -time 9:00
 # Will charge to 95% by 9:00 AM tomorrow
 # if the specified time is in the past, it assumes the next day
+```
+
+### Run the tray icon
+```bash
+./conservation-tray
+# We recommend adding it to your desktop environment startup applications!
 ```
 
 ### Daemon Options
