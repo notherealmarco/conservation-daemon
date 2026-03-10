@@ -50,7 +50,9 @@ type Config struct {
 	DryRun                bool
 	Once                  bool
 	Auto                  bool
-	SysfsPath             string
+	SysfsPath      string // explicit conservation_mode path (legacy)
+	BatteryName    string // e.g. "BAT0"; used for charge_types lookup
+	UseChargeTypes bool   // true when charge_types backend is active
 
 	// Control socket
 	SockPath  string
@@ -101,13 +103,26 @@ func main() {
 		exitErr(fmt.Errorf("conservation-threshold must be in [50,100], got %.1f", cfg.ConservationThreshold))
 	}
 
-	conspath := cfg.SysfsPath
-	if conspath == "" {
+	// Determine which sysfs backend to use.
+	// Priority: 1) charge_types (standard API)  2) conservation_mode (vendor-specific)
+	var conspath string
+	if cfg.SysfsPath != "" {
+		// Explicit --sysfs flag: use conservation_mode directly
+		conspath = cfg.SysfsPath
+		logf("Using explicit conservation_mode path: %s", conspath)
+	} else if ctPath := findChargeTypesNode(cfg.BatteryName); ctPath != "" {
+		// Standard charge_types API available
+		cfg.UseChargeTypes = true
+		conspath = ctPath
+		logf("Using charge_types backend: %s", ctPath)
+	} else {
+		// Fall back to vendor-specific conservation_mode
 		var err error
 		conspath, err = findConservationNode()
 		if err != nil {
 			exitErr(err)
 		}
+		logf("Using conservation_mode backend: %s", conspath)
 	}
 
 	ctx := context.Background()
@@ -122,8 +137,7 @@ func main() {
 		exitErr(err)
 	}
 
-	logf("Using battery path: %s", batPath)
-	logf("Using sysfs path: %s", conspath)
+	logf("Using UPower battery path: %s", batPath)
 
 	// Shared state for control-plane
 	st := &SharedState{cfg: cfg}
@@ -174,6 +188,7 @@ func parseFlags() Config {
 	once := flag.Bool("once", false, "perform a single control step and exit")
 	auto := flag.Bool("auto", false, "enable/disable conservation mode based on external monitor connection status")
 	sysfs := flag.String("sysfs", "", "explicit conservation_mode path; auto-discover if empty")
+	battery := flag.String("battery", "BAT0", "battery name for charge_types lookup (e.g. BAT0, BAT1)")
 	sock := flag.String("sock", "/run/conservationd/conservationd.sock", "UNIX control socket path ('' to disable)")
 	sockGroup := flag.String("sock-group", "conservationd", "group name to own the socket (0660)")
 	statePath := flag.String("state", "/var/lib/conservationd/state.json", "path to persist runtime state ('' to disable)")
@@ -191,6 +206,7 @@ func parseFlags() Config {
 		Once:                  *once,
 		Auto:                  *auto,
 		SysfsPath:             *sysfs,
+		BatteryName:           *battery,
 		SockPath:              *sock,
 		SockGroup:             *sockGroup,
 		StatePath:             *statePath,
@@ -211,7 +227,7 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 		logf("read upower error: %v", err)
 		return
 	}
-	cur, err := readConservation(conspath)
+	cur, err := readConservation(cfg, conspath)
 	if err != nil {
 		st.mu.Lock()
 		st.lastErr = err.Error()
@@ -350,13 +366,14 @@ func runOnce(ctx context.Context, conn *dbus.Conn, batPath dbus.ObjectPath, cons
 		pct, stateString(state), cur, action, cfg.MaxPercent, cfg.LevelReached)
 
 	if want != cur {
+		wantStr := consValueString(cfg, want)
 		if cfg.DryRun {
-			logf("[dry-run] would write %d to %s", want, conspath)
+			logf("[dry-run] would write %s to %s", wantStr, conspath)
 		} else {
-			if err := writeConservation(conspath, want); err != nil {
+			if err := writeConservation(cfg, conspath, want); err != nil {
 				logf("write cons error: %v", err)
 			} else {
-				logf("conservation set to %d", want)
+				logf("conservation set to %s", wantStr)
 			}
 		}
 	}
@@ -586,6 +603,16 @@ func readUPower(ctx context.Context, conn *dbus.Conn, path dbus.ObjectPath) (per
 	}
 }
 
+// findChargeTypesNode checks if /sys/class/power_supply/<battery>/charge_types
+// exists and is readable. Returns the path if available, or "" if not.
+func findChargeTypesNode(battery string) string {
+	p := fmt.Sprintf("/sys/class/power_supply/%s/charge_types", battery)
+	if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		return p
+	}
+	return ""
+}
+
 func findConservationNode() (string, error) {
 	candidates := []string{
 		"/sys/bus/platform/drivers/ideapad_acpi/VPC2004:00/conservation_mode",
@@ -621,7 +648,63 @@ func findConservationNode() (string, error) {
 	return best, nil
 }
 
-func readConservation(path string) (int, error) {
+// consValueString returns a human-readable representation of the conservation
+// value for log messages: "Long_Life"/"Standard" for charge_types, "1"/"0" for legacy.
+func consValueString(cfg Config, v int) string {
+	if cfg.UseChargeTypes {
+		if v == 1 {
+			return "Long_Life"
+		}
+		return "Standard"
+	}
+	return strconv.Itoa(v)
+}
+
+// readChargeType reads /sys/class/power_supply/<bat>/charge_types and returns
+// the currently active mode (the one in [brackets]), e.g. "Long_Life".
+func readChargeType(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(b))
+	// Format: "Fast Standard [Long_Life]" — active mode is in brackets.
+	start := strings.Index(s, "[")
+	end := strings.Index(s, "]")
+	if start < 0 || end <= start {
+		return "", fmt.Errorf("cannot parse charge_types: %q", s)
+	}
+	return s[start+1 : end], nil
+}
+
+// writeChargeType writes a mode string (e.g. "Long_Life", "Standard") to the
+// charge_types sysfs file.
+func writeChargeType(path string, mode string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte(mode + "\n")); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// readConservation returns 1 if conservation/Long_Life mode is active, 0 otherwise.
+// Dispatches to charge_types or conservation_mode backend based on config.
+func readConservation(cfg Config, path string) (int, error) {
+	if cfg.UseChargeTypes {
+		mode, err := readChargeType(path)
+		if err != nil {
+			return 0, err
+		}
+		if mode == "Long_Life" {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	// Legacy conservation_mode: file contains "0" or "1"
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
@@ -633,10 +716,20 @@ func readConservation(path string) (int, error) {
 	return 0, nil
 }
 
-func writeConservation(path string, v int) error {
+// writeConservation sets conservation mode on (v=1) or off (v=0).
+// Dispatches to charge_types or conservation_mode backend based on config.
+func writeConservation(cfg Config, path string, v int) error {
 	if v != 0 && v != 1 {
 		return fmt.Errorf("invalid conservation value %d", v)
 	}
+	if cfg.UseChargeTypes {
+		mode := "Standard"
+		if v == 1 {
+			mode = "Long_Life"
+		}
+		return writeChargeType(path, mode)
+	}
+	// Legacy conservation_mode
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
